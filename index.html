@@ -130,11 +130,57 @@
   .scores>div{display:flex;flex-direction:column;gap:3px}
   .big{font-weight:900;font-size:clamp(17px,5vw,24px);font-variant-numeric:tabular-nums}
   .tip{margin:12px 0 0;font-size:clamp(10.5px,2.8vw,12px);color:rgba(170,152,200,.65)}
+
+  /* ---------- intro / cinematic ---------- */
+  .bar{
+    position:absolute;left:0;right:0;height:0;background:#04020a;z-index:4;
+    transition:height .7s cubic-bezier(.4,0,.2,1);
+  }
+  .bar.top{top:0}
+  .bar.bot{bottom:0}
+  #stage.cinema .bar{height:7.5%}
+  .intro-ui{
+    position:absolute;inset:0;z-index:5;pointer-events:none;
+    opacity:0;transition:opacity .5s ease;
+  }
+  .intro-ui.show{opacity:1}
+  .skip{
+    position:absolute;right:clamp(12px,4vw,24px);
+    top:calc(7.5% + 12px + env(safe-area-inset-top));
+    pointer-events:auto;cursor:pointer;
+    font-family:'Nunito',sans-serif;font-weight:900;
+    font-size:clamp(10px,2.7vw,12px);letter-spacing:.16em;text-transform:uppercase;
+    padding:9px 16px;border-radius:999px;color:#e6d9ff;
+    background:rgba(24,12,44,.6);border:1px solid rgba(180,150,255,.36);
+    backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+    transition:transform .14s ease,background .2s ease;
+  }
+  .skip:hover{background:rgba(60,34,104,.75)}
+  .skip:active{transform:scale(.95)}
+  .caption{
+    position:absolute;left:0;right:0;bottom:calc(7.5% + 22px);
+    text-align:center;font-family:'Chewy',Georgia,serif;
+    font-size:clamp(14px,4.2vw,21px);letter-spacing:.04em;
+    color:rgba(240,230,255,.92);
+    text-shadow:0 2px 26px rgba(0,0,0,.95),0 0 30px rgba(120,60,200,.6);
+    opacity:0;transition:opacity .55s ease;padding:0 18px;
+  }
+  .caption.show{opacity:1}
 </style>
 </head>
 <body>
 <div id="stage">
   <canvas id="game" aria-label="Shrine Runner game"></canvas>
+
+  <div id="bars">
+    <div class="bar top"></div>
+    <div class="bar bot"></div>
+  </div>
+
+  <div id="introUI" class="intro-ui">
+    <button id="skipBtn" class="skip" type="button">Skip intro</button>
+    <div id="caption" class="caption"></div>
+  </div>
 
   <div id="hud" class="hud hidden">
     <div class="stat"><span class="klabel">Distance</span><span class="kval" id="hudDist">0 m</span></div>
@@ -197,6 +243,8 @@
   var ovScore = document.getElementById('ovScore');
   var muteBtn = document.getElementById('muteBtn');
   var hintEl = document.getElementById('hint');
+  var introUI = document.getElementById('introUI');
+  var skipBtn = document.getElementById('skipBtn');
 
   /* ================= constants ================= */
   var GRAV = 2500;
@@ -335,6 +383,16 @@
       this.blip(560, 150, 0.75, 'sawtooth', 0.16);
       this.blip(420, 110, 0.9, 'square', 0.07, 0.09);
       this.noise(0.7, 0.12, 210, 0.05);
+    },
+    shriek: function () {
+      this.blip(1500, 360, 0.55, 'sawtooth', 0.15);
+      this.blip(760, 1900, 0.5, 'square', 0.06, 0.05);
+      this.noise(0.62, 0.17, 1500, 0.02);
+    },
+    chime: function () {
+      this.blip(700, 1050, 0.3, 'triangle', 0.11);
+      this.blip(1050, 1400, 0.35, 'triangle', 0.09, 0.08);
+      this.blip(1400, 1860, 0.4, 'sine', 0.07, 0.16);
     },
     toggleMute: function () {
       this.muted = !this.muted;
@@ -535,6 +593,7 @@
   var lastHud = '';
 
   function step(dt) {
+    if (state.mode === 'intro') { stepIntro(dt); return; }
     var running = state.mode === 'run';
 
     if (running) state.t += dt;
@@ -1210,158 +1269,274 @@
     }
   }
 
-  /* ================= player ================= */
-  function drawThief(cx, baseY, sliding, airborne) {
-    var swing = Math.sin(player.runPhase * 2);
-    var swing2 = Math.sin(player.runPhase * 2 + Math.PI);
+  /* ================= thief ================= */
+  function twoBone(hx, hy, fx, fy, a, b, forward) {
+    var dx = fx - hx, dy = fy - hy;
+    var d = Math.sqrt(dx * dx + dy * dy);
+    if (d < 0.0001) d = 0.0001;
+    var maxD = a + b - 0.2;
+    if (d > maxD) {
+      fx = hx + (dx / d) * maxD;
+      fy = hy + (dy / d) * maxD;
+      dx = fx - hx; dy = fy - hy; d = maxD;
+    }
+    var base = Math.atan2(dy, dx);
+    var cosA = (d * d + a * a - b * b) / (2 * d * a);
+    if (cosA > 1) cosA = 1; if (cosA < -1) cosA = -1;
+    var ang = Math.acos(cosA);
+    var k1x = hx + Math.cos(base - ang) * a, k1y = hy + Math.sin(base - ang) * a;
+    var k2x = hx + Math.cos(base + ang) * a, k2y = hy + Math.sin(base + ang) * a;
+    var use1 = forward ? (k1x >= k2x) : (k1x <= k2x);
+    return use1 ? { x: k1x, y: k1y, fx: fx, fy: fy } : { x: k2x, y: k2y, fx: fx, fy: fy };
+  }
+
+  function mixHex(a, b, t) {
+    function px(h) { return [parseInt(h.substr(1, 2), 16), parseInt(h.substr(3, 2), 16), parseInt(h.substr(5, 2), 16)]; }
+    var A = px(a), B = px(b);
+    return 'rgb(' + Math.round(A[0] + (B[0] - A[0]) * t) + ',' + Math.round(A[1] + (B[1] - A[1]) * t) + ',' + Math.round(A[2] + (B[2] - A[2]) * t) + ')';
+  }
+
+  var THIEF = {
+    cloak: '#312c5c', cloakLight: '#4a4285', cloakDark: '#1e1938',
+    tunic: '#514570', pants: '#231e3a',
+    boot: '#3f2d1f', bootDark: '#2a1d13',
+    leather: '#6b4a2a', leatherDark: '#432b17',
+    skin: '#e9bd99', skinDark: '#b98d6b', hood: '#352f63'
+  };
+
+  /* Human-proportioned thief. Local space: feet at y=0, head near y=-62.
+     opts: pose 'run'|'walk'|'stand'|'reach'|'slide', phase, scale, turn, lean, lit, airborne */
+  function drawThief(cx, baseY, o) {
+    o = o || {};
+    var phase = o.phase || 0;
+    var pose = o.pose || 'run';
+    var sc = o.scale || 1;
+    var turn = (o.turn === undefined) ? 1 : o.turn;
+    var lean = (o.lean === undefined) ? 0.15 : o.lean;
+    var lit = o.lit || 0;
+    var airborne = !!o.airborne;
+    var standing = (pose === 'stand' || pose === 'reach');
+
+    var HIP = -22, SH = -21;
 
     ctx.save();
     ctx.translate(cx, baseY);
+    var sx = turn >= 0 ? Math.max(0.05, turn) : Math.min(-0.05, turn);
+    ctx.scale(sc * sx, sc);
+    if (pose === 'slide') { ctx.rotate(-0.1); ctx.scale(1.2, 0.56); }
 
-    if (sliding) {
-      ctx.rotate(-0.16);
-      ctx.scale(1.16, 0.56);
+    function footFor(p, front) {
+      if (standing) return { x: front ? 4.5 : -5.5, y: 0 };
+      if (airborne) return front ? { x: 9, y: -3 } : { x: -8, y: -7 };
+      var stride = pose === 'walk' ? 9 : 13;
+      var lift = pose === 'walk' ? 6 : 9.5;
+      return { x: Math.sin(p) * stride, y: -Math.max(0, Math.cos(p)) * lift };
     }
 
-    var cloak = '#3d3172';
-    var cloakDark = '#2a2154';
-    var skin = '#f6dfe9';
-    var relic = '#ff5ea8';
-
-    // back leg + front leg
-    function leg(hipX, footX, footY, col) {
-      ctx.strokeStyle = col;
-      ctx.lineWidth = 7;
+    function drawLeg(hipX, foot, front) {
+      var k = twoBone(hipX, HIP, foot.x, foot.y, 13.6, 13.6, true);
+      ctx.strokeStyle = front ? THIEF.pants : '#191528';
+      ctx.lineWidth = front ? 6.8 : 6;
       ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(hipX, HIP); ctx.lineTo(k.x, k.y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(k.x, k.y); ctx.lineTo(k.fx, k.fy); ctx.stroke();
+
+      ctx.save();
+      ctx.translate(k.fx, k.fy);
+      ctx.fillStyle = front ? THIEF.boot : THIEF.bootDark;
       ctx.beginPath();
-      ctx.moveTo(hipX, -20);
-      ctx.lineTo(footX, footY);
-      ctx.stroke();
-      ctx.fillStyle = '#171027';
-      ctx.beginPath();
-      ctx.ellipse(footX + 1.5, footY + 1, 5, 3.2, 0, 0, 6.283);
+      ctx.moveTo(-4.4, -7.2);
+      ctx.lineTo(1.6, -7.2);
+      ctx.quadraticCurveTo(5.6, -6.4, 7.4, -2.6);
+      ctx.quadraticCurveTo(7.8, -0.2, 5.2, 0.7);
+      ctx.lineTo(-4.6, 0.7);
+      ctx.quadraticCurveTo(-6.4, 0.2, -6.2, -2.4);
+      ctx.closePath();
       ctx.fill();
+      ctx.fillStyle = front ? '#503a28' : '#33241a';
+      roundRect(-4.6, -9, 8.2, 3.2, 1.5);
+      ctx.fill();
+      ctx.restore();
     }
 
-    if (airborne) {
-      leg(-5, -10, -12, cloakDark);
-      leg(5, 9, -18, '#2b2150');
-    } else {
-      leg(-5, -5 + swing * 7, -Math.max(0, swing) * 5, cloakDark);
-      leg(5, 5 + swing2 * 7, -Math.max(0, swing2) * 5, '#2b2150');
+    function armHand(p) {
+      if (pose === 'reach') return { x: 17.5, y: -30 };
+      if (pose === 'stand') return { x: 3, y: -8 };
+      var sw = Math.sin(p);
+      return { x: 3 + sw * 7.5, y: SH + 15 - Math.abs(sw) * 2.5 };
     }
 
-    // trailing scarf
-    var flap = Math.sin(player.runPhase * 2.4) * 4;
-    ctx.fillStyle = '#8a3fbe';
-    ctx.beginPath();
-    ctx.moveTo(-2, -47);
-    ctx.quadraticCurveTo(-16, -50 + flap, -26, -42 + flap * 1.6);
-    ctx.quadraticCurveTo(-16, -44 + flap, -2, -41);
-    ctx.closePath();
-    ctx.fill();
+    function drawArm(shX, hand, front) {
+      var k = twoBone(shX, SH + 2, hand.x, hand.y, 9.4, 9, false);
+      ctx.strokeStyle = front ? THIEF.cloakLight : THIEF.cloakDark;
+      ctx.lineWidth = front ? 5.6 : 5;
+      ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(shX, SH + 2); ctx.lineTo(k.x, k.y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(k.x, k.y); ctx.lineTo(k.fx, k.fy); ctx.stroke();
+      ctx.fillStyle = front ? THIEF.skin : THIEF.skinDark;
+      ctx.beginPath(); ctx.arc(k.fx, k.fy, 2.7, 0, 6.283); ctx.fill();
+    }
 
-    // cloak body
-    ctx.fillStyle = cloak;
-    ctx.beginPath();
-    ctx.moveTo(-10, -50);
-    ctx.quadraticCurveTo(-16, -32, -13, -13);
-    ctx.quadraticCurveTo(-6, -8, 0, -11);
-    ctx.quadraticCurveTo(6, -8, 13, -13);
-    ctx.quadraticCurveTo(16, -32, 10, -50);
-    ctx.closePath();
-    ctx.fill();
+    /* ---- legs (behind the cloak) ---- */
+    drawLeg(-4.5, footFor(phase + Math.PI, false), false);
+    drawLeg(4, footFor(phase, true), true);
 
-    // rim light on the cloak edge
-    ctx.strokeStyle = 'rgba(176,142,255,0.62)';
-    ctx.lineWidth = 1.7;
-    ctx.beginPath();
-    ctx.moveTo(-10, -50);
-    ctx.quadraticCurveTo(-16, -32, -13, -13);
-    ctx.quadraticCurveTo(-6, -8, 0, -11);
-    ctx.quadraticCurveTo(6, -8, 13, -13);
-    ctx.quadraticCurveTo(16, -32, 10, -50);
-    ctx.stroke();
-
-    // cloak shading
-    ctx.fillStyle = 'rgba(10,6,20,0.35)';
-    ctx.beginPath();
-    ctx.moveTo(2, -50);
-    ctx.quadraticCurveTo(12, -32, 11, -14);
-    ctx.quadraticCurveTo(14, -16, 13, -13);
-    ctx.quadraticCurveTo(16, -32, 10, -50);
-    ctx.closePath();
-    ctx.fill();
-
-    // belt
-    ctx.fillStyle = '#5b3a20';
-    roundRect(-11, -30, 22, 5, 2.5);
-    ctx.fill();
-    ctx.fillStyle = '#ffcf6b';
-    ctx.fillRect(-2.5, -30.5, 5, 6);
-
-    // satchel
-    ctx.fillStyle = '#6b4a2a';
+    /* ---- torso group ---- */
     ctx.save();
-    ctx.translate(-11, -26);
-    ctx.rotate(0.18);
-    roundRect(-6, 0, 13, 12, 3.5);
+    ctx.translate(0, HIP);
+    ctx.rotate(lean);
+
+    drawArm(-3.6, armHand(phase + Math.PI), false);
+
+    var sway = Math.sin(phase) * 1.5;
+    var g = ctx.createLinearGradient(0, SH, 0, 12);
+    g.addColorStop(0, THIEF.cloakLight);
+    g.addColorStop(0.55, THIEF.cloak);
+    g.addColorStop(1, THIEF.cloakDark);
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(-6.6, SH);
+    ctx.quadraticCurveTo(-10.4, SH + 7, -10.8 - sway, 2.6);
+    ctx.quadraticCurveTo(-4.2, 6.4, 5.4, 4.8);
+    ctx.quadraticCurveTo(10.6, SH + 7, 6.6, SH);
+    ctx.quadraticCurveTo(0, SH - 3, -6.6, SH);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.strokeStyle = 'rgba(11,8,24,0.5)';
+    ctx.lineWidth = 1.1;
+    ctx.beginPath(); ctx.moveTo(-3.2, SH + 3); ctx.quadraticCurveTo(-5.8, -4, -6.8, 2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(3.4, SH + 3); ctx.quadraticCurveTo(6.2, -4, 7.2, 1.6); ctx.stroke();
+
+    ctx.fillStyle = THIEF.tunic;
+    ctx.beginPath();
+    ctx.moveTo(-1.6, SH + 1);
+    ctx.quadraticCurveTo(-2.6, -6, -1.5, 1.4);
+    ctx.lineTo(2.2, 1.8);
+    ctx.quadraticCurveTo(2.6, -6, 1.6, SH + 1);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = 'rgba(12,9,26,0.30)';
+    ctx.beginPath();
+    ctx.moveTo(-6.6, SH + 0.4);
+    ctx.quadraticCurveTo(0, SH + 3.6, 6.6, SH + 0.4);
+    ctx.quadraticCurveTo(0, SH - 1.4, -6.6, SH + 0.4);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = THIEF.leather;
+    roundRect(-9.2, -5.4, 18.4, 4, 1.6);
+    ctx.fill();
+    ctx.fillStyle = '#d9b26a';
+    roundRect(-2.2, -5.9, 4.6, 5.2, 1.3);
+    ctx.fill();
+
+    /* ---- head ---- */
+    var hx = 1.2, hy = SH - 10.6;
+    ctx.fillStyle = THIEF.skinDark;
+    roundRect(-1.8, SH - 3.4, 4.2, 5.4, 1.8);
+    ctx.fill();
+
+    var skinCol = lit > 0.02 ? mixHex(THIEF.skin, '#ffe3b8', lit) : THIEF.skin;
+    ctx.fillStyle = skinCol;
+    ctx.beginPath();
+    ctx.ellipse(hx + 1.2, hy + 1.2, 4.7, 5.3, -0.06, 0, 6.283);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(hx + 4.4, hy + 1.4);
+    ctx.lineTo(hx + 6.8, hy + 2.7);
+    ctx.lineTo(hx + 4.2, hy + 3.6);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = THIEF.hood;
+    ctx.beginPath();
+    ctx.ellipse(hx - 0.4, hy - 1.1, 6.9, 7.6, 0, 0, 6.283);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(hx - 6.6, hy + 1.5);
+    ctx.quadraticCurveTo(hx - 9.5, hy - 9, hx - 1.2, hy - 9.4);
+    ctx.quadraticCurveTo(hx + 5.2, hy - 8.4, hx + 6.4, hy - 3.2);
+    ctx.quadraticCurveTo(hx + 2, hy - 5.4, hx + 0.4, hy + 2.4);
+    ctx.quadraticCurveTo(hx - 2.6, hy + 5.6, hx - 6.6, hy + 1.5);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = 'rgba(10,7,22,0.55)';
+    ctx.beginPath();
+    ctx.ellipse(hx + 1.4, hy + 0.2, 4.4, 5.2, -0.08, 0, 6.283);
+    ctx.fill();
+    ctx.fillStyle = skinCol;
+    ctx.beginPath();
+    ctx.ellipse(hx + 2, hy + 1.6, 3.6, 4.1, -0.06, 0, 6.283);
+    ctx.fill();
+
+    if (lit > 0.02) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      var lg = ctx.createRadialGradient(hx + 3, hy + 1, 1, hx + 3, hy + 1, 20);
+      lg.addColorStop(0, 'rgba(255,225,170,' + (0.45 * lit) + ')');
+      lg.addColorStop(1, 'rgba(255,180,110,0)');
+      ctx.fillStyle = lg;
+      ctx.beginPath(); ctx.arc(hx + 3, hy + 1, 20, 0, 6.283); ctx.fill();
+      ctx.restore();
+    }
+
+    ctx.save();
+    ctx.shadowColor = 'rgba(255,205,110,0.95)';
+    ctx.shadowBlur = 4 + lit * 6;
+    ctx.fillStyle = lit > 0.3 ? '#ffe9b0' : '#ffd166';
+    ctx.beginPath(); ctx.ellipse(hx + 2.4, hy + 0.5, 1.5, 1.9, 0, 0, 6.283); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(hx + 5.2, hy + 0.6, 1.3, 1.7, 0, 0, 6.283); ctx.fill();
+    ctx.restore();
+
+    ctx.restore();
+
+    /* ---- front arm ---- */
+    ctx.save();
+    ctx.translate(0, HIP);
+    ctx.rotate(lean);
+    drawArm(4.2, armHand(phase), true);
+
+    /* ---- satchel + relic ---- */
+    ctx.fillStyle = THIEF.leatherDark;
+    ctx.save();
+    ctx.rotate(-0.36);
+    roundRect(-13, -3, 4.4, 15.5, 1.4);
     ctx.fill();
     ctx.restore();
 
-    // head / hood
-    ctx.fillStyle = cloak;
-    ctx.beginPath();
-    ctx.arc(0, -52, 12.5, 0, 6.283);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.moveTo(-9, -58);
-    ctx.quadraticCurveTo(-2, -74, 10, -60);
-    ctx.quadraticCurveTo(2, -64, -9, -58);
-    ctx.closePath();
-    ctx.fill();
-
-    // face
-    ctx.fillStyle = '#0d0818';
-    ctx.beginPath();
-    ctx.ellipse(1.5, -51, 8, 8.6, 0, 0, 6.283);
-    ctx.fill();
-
-    // eyes
     ctx.save();
-    ctx.shadowColor = 'rgba(255,205,110,0.9)';
-    ctx.shadowBlur = 5;
-    ctx.fillStyle = '#ffd166';
-    ctx.beginPath(); ctx.ellipse(-3.2, -52.5, 1.9, 2.3, 0, 0, 6.283); ctx.fill();
-    ctx.beginPath(); ctx.ellipse(5.6, -52.5, 1.9, 2.3, 0, 0, 6.283); ctx.fill();
+    ctx.translate(-9.4, 2.4);
+    ctx.rotate(0.16);
+    ctx.fillStyle = THIEF.leather;
+    roundRect(-5.4, 0, 11.4, 10.4, 3);
+    ctx.fill();
+    ctx.fillStyle = THIEF.leatherDark;
+    roundRect(-5.4, 0, 11.4, 3, 1.6);
+    ctx.fill();
+    ctx.fillStyle = '#d9b26a';
+    ctx.fillRect(-1.2, 4.4, 2.6, 2.6);
     ctx.restore();
 
-    // arm
-    ctx.strokeStyle = cloak;
-    ctx.lineWidth = 6;
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.moveTo(8, -38);
-    if (airborne) ctx.lineTo(17, -46);
-    else ctx.lineTo(11 + swing * 5, -28);
-    ctx.stroke();
-
-    // the relic
     var pulse = 0.8 + Math.sin(state.t * 6) * 0.2;
+    var rx = -9.4, ry = 1.2;
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    var rg = ctx.createRadialGradient(12, -44, 1, 12, -44, 15 * pulse);
-    rg.addColorStop(0, 'rgba(255,140,210,0.85)');
-    rg.addColorStop(0.4, 'rgba(220,70,180,0.35)');
+    var rg = ctx.createRadialGradient(rx, ry, 1, rx, ry, 10.5 * pulse);
+    rg.addColorStop(0, 'rgba(255,150,215,' + (0.34 + lit * 0.22) + ')');
+    rg.addColorStop(0.4, 'rgba(224,74,184,0.2)');
     rg.addColorStop(1, 'rgba(160,40,200,0)');
     ctx.fillStyle = rg;
-    ctx.beginPath(); ctx.arc(12, -44, 15 * pulse, 0, 6.283); ctx.fill();
+    ctx.beginPath(); ctx.arc(rx, ry, 10.5 * pulse, 0, 6.283); ctx.fill();
     ctx.restore();
-    ctx.fillStyle = relic;
-    ctx.beginPath(); ctx.arc(12, -44, 4.2, 0, 6.283); ctx.fill();
+    ctx.fillStyle = '#ff6fb2';
+    ctx.beginPath(); ctx.arc(rx, ry, 3.2, 0, 6.283); ctx.fill();
     ctx.fillStyle = '#ffeaf6';
-    ctx.beginPath(); ctx.arc(12, -44, 1.9, 0, 6.283); ctx.fill();
+    ctx.beginPath(); ctx.arc(rx, ry, 1.4, 0, 6.283); ctx.fill();
 
+    ctx.restore();
     ctx.restore();
   }
 
@@ -1400,148 +1575,292 @@
     ctx.beginPath(); ctx.arc(PX, baseY - 34, 68, 0, 6.283); ctx.fill();
     ctx.restore();
 
-    drawThief(PX, baseY, sliding, airborne);
+    drawThief(PX, baseY, {
+      pose: sliding ? 'slide' : 'run',
+      phase: player.runPhase * 1.6,
+      scale: 1,
+      turn: 1,
+      lean: sliding ? 0.05 : 0.2,
+      airborne: airborne,
+      lit: 0
+    });
   }
 
   /* ================= witch ================= */
-  function drawWitch() {
-    var gap = state.gap;
-    var lunge = state.witchLunge;
-    var bob = Math.sin(state.t * 5) * 6;
-    var x = PX - gap + lunge * 30;
-    var y = GY - 44 + bob + Math.sin(state.t * 2.1) * 3;
+  var WITCH = {
+    robe: '#4d1139', robeLight: '#742154', robeDark: '#2a0a22',
+    hat: '#2c1739', hatBand: '#9a3ac4',
+    skin: '#a6e8bb', skinDark: '#78c79a',
+    hair: '#35133f', hairLight: '#64256e',
+    broom: '#a97a41', broomDark: '#6d4a24',
+    bristle: '#d8b06a', bristleDark: '#a07c3c'
+  };
 
-    drawShadow(Math.min(x, PX), GY + 3, 26, 6);
+  /* Witch riding her broom. Origin is the broom's top surface, facing right.
+     opts: t, scale, bob, speed (world speed for hair/robe streaming), face */
+  function drawWitchFigure(x, y, o) {
+    o = o || {};
+    var t = o.t || 0;
+    var sc = o.scale || 1;
+    var face = (o.face === undefined) ? 1 : o.face;
+    var stream = 0.7 + Math.min(1.5, (o.speed || 0) / 400) * 1.3;
+    var flut = Math.sin(t * 5.5);
 
     ctx.save();
     ctx.translate(x, y);
+    ctx.scale(sc * face, sc);
 
-    // aura when close
+    /* ---------- hair streaming behind ---------- */
+    for (var i = 0; i < 6; i++) {
+      var by = -40 - i * 1.1;
+      var w1 = Math.sin(t * 4.2 + i * 0.8) * 3.4 * stream;
+      var w2 = Math.sin(t * 3.1 + i * 1.3 + 1) * 5 * stream;
+      ctx.strokeStyle = i % 2 ? WITCH.hairLight : WITCH.hair;
+      ctx.lineWidth = 4.6 - i * 0.45;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(-2 - i * 0.6, by);
+      ctx.bezierCurveTo(-14, by - 3 + w1, -26 - i * 2.2, by + 8 + w2, -34 - i * 4.4, by + 20 + w2 * 1.4);
+      ctx.stroke();
+    }
+
+    /* ---------- robe skirt draping back ---------- */
+    var f1 = Math.sin(t * 4.6) * 3 * stream;
+    var f2 = Math.sin(t * 3.4 + 1.6) * 4 * stream;
+    var rg = ctx.createLinearGradient(0, -16, 0, 22);
+    rg.addColorStop(0, WITCH.robeLight);
+    rg.addColorStop(0.5, WITCH.robe);
+    rg.addColorStop(1, WITCH.robeDark);
+    ctx.fillStyle = rg;
+    ctx.beginPath();
+    ctx.moveTo(4, -14);
+    ctx.quadraticCurveTo(10, 2, 14, 13);
+    ctx.quadraticCurveTo(4, 17 + f1, -6, 15);
+    ctx.quadraticCurveTo(-18 - f2, 20, -30 - f2 * 1.2, 13 + f1);
+    ctx.quadraticCurveTo(-20, 4, -12, -13);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.strokeStyle = 'rgba(12,4,16,0.45)';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.moveTo(-2, -10); ctx.quadraticCurveTo(2, 4, 4, 15); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-8, -12); ctx.quadraticCurveTo(-14, 2, -20 + f2 * 0.5, 15); ctx.stroke();
+
+    /* ---------- broom ---------- */
+    ctx.strokeStyle = WITCH.broom;
+    ctx.lineWidth = 4.6;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(-58, 10);
+    ctx.quadraticCurveTo(-10, 4, 42, -3);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,225,170,0.28)';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(-56, 7.4);
+    ctx.quadraticCurveTo(-10, 1.4, 40, -5.4);
+    ctx.stroke();
+
+    // bristles
+    for (var b = 0; b < 15; b++) {
+      var a = 2.62 + (b / 14) * 1.05;
+      var len = 20 + Math.sin(b * 1.7) * 6 + (b % 3) * 2;
+      ctx.strokeStyle = b % 3 === 0 ? WITCH.bristleDark : WITCH.bristle;
+      ctx.lineWidth = b % 3 === 0 ? 1.5 : 1.9;
+      ctx.beginPath();
+      ctx.moveTo(-46, 8);
+      ctx.lineTo(-46 + Math.cos(a) * len, 8 + Math.sin(a) * len + Math.sin(t * 6 + b) * 0.9);
+      ctx.stroke();
+    }
+    // binding
+    ctx.strokeStyle = WITCH.broomDark;
+    ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(-44, 6.4); ctx.lineTo(-44, 11.4); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-49, 7.2); ctx.lineTo(-49, 12); ctx.stroke();
+
+    /* ---------- far leg ---------- */
+    ctx.strokeStyle = WITCH.robeDark;
+    ctx.lineWidth = 5.6;
+    ctx.beginPath(); ctx.moveTo(-2, -8); ctx.lineTo(8, -2); ctx.lineTo(16, -6); ctx.stroke();
+    ctx.fillStyle = '#1c0a1a';
+    ctx.beginPath();
+    ctx.moveTo(15, -8.6); ctx.lineTo(24, -7.4); ctx.lineTo(16, -2.4); ctx.closePath();
+    ctx.fill();
+
+    /* ---------- torso ---------- */
+    var tg = ctx.createLinearGradient(0, -34, 0, -8);
+    tg.addColorStop(0, WITCH.robeLight);
+    tg.addColorStop(1, WITCH.robe);
+    ctx.fillStyle = tg;
+    ctx.beginPath();
+    ctx.moveTo(-5.4, -32);
+    ctx.quadraticCurveTo(-8.4, -20, -5.6, -8);
+    ctx.quadraticCurveTo(0, -5, 6, -8);
+    ctx.quadraticCurveTo(8.6, -21, 5.4, -32);
+    ctx.quadraticCurveTo(0, -35, -5.4, -32);
+    ctx.closePath();
+    ctx.fill();
+
+    // collar
+    ctx.fillStyle = WITCH.robeDark;
+    ctx.beginPath();
+    ctx.moveTo(-6.4, -33);
+    ctx.quadraticCurveTo(0, -37.4, 6.6, -32.6);
+    ctx.quadraticCurveTo(2, -30.6, -6.4, -33);
+    ctx.closePath();
+    ctx.fill();
+
+    // belt
+    ctx.fillStyle = '#3a0d2c';
+    roundRect(-6.6, -18, 13.4, 3.4, 1.4);
+    ctx.fill();
+
+    /* ---------- near leg (bent over the broom) ---------- */
+    ctx.strokeStyle = WITCH.robe;
+    ctx.lineWidth = 6.2;
+    ctx.beginPath(); ctx.moveTo(1, -9); ctx.lineTo(11, -3); ctx.lineTo(19, -8); ctx.stroke();
+    ctx.fillStyle = '#240d22';
+    ctx.beginPath();
+    ctx.moveTo(18, -10.4); ctx.lineTo(28, -9); ctx.lineTo(19.4, -3.6); ctx.closePath();
+    ctx.fill();
+
+    /* ---------- arms ---------- */
+    ctx.strokeStyle = WITCH.robeLight;
+    ctx.lineWidth = 4.6;
+    ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(3, -29); ctx.lineTo(13, -22); ctx.lineTo(20, -14); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-2, -28); ctx.lineTo(8, -20); ctx.lineTo(15, -12); ctx.stroke();
+    ctx.fillStyle = WITCH.skin;
+    ctx.beginPath(); ctx.arc(20.5, -13.4, 2.9, 0, 6.283); ctx.fill();
+    ctx.beginPath(); ctx.arc(15.4, -11.4, 2.7, 0, 6.283); ctx.fill();
+
+    /* ---------- head ---------- */
+    ctx.fillStyle = WITCH.skinDark;
+    roundRect(0.6, -36.4, 3.6, 4.4, 1.6);
+    ctx.fill();
+
+    ctx.fillStyle = WITCH.skin;
+    ctx.beginPath();
+    ctx.ellipse(4, -41, 6.2, 6.6, 0.06, 0, 6.283);
+    ctx.fill();
+    // long nose
+    ctx.beginPath();
+    ctx.moveTo(8.6, -43.4);
+    ctx.quadraticCurveTo(16.4, -41.6, 16.6, -39.4);
+    ctx.quadraticCurveTo(13.4, -38.6, 8.4, -38.8);
+    ctx.closePath();
+    ctx.fill();
+    // chin
+    ctx.beginPath();
+    ctx.moveTo(7.6, -37.4);
+    ctx.quadraticCurveTo(6.2, -34.8, 2.6, -35.6);
+    ctx.quadraticCurveTo(4.8, -36.2, 6.4, -38);
+    ctx.closePath();
+    ctx.fill();
+
+    // cheek shadow
+    ctx.fillStyle = 'rgba(60,20,70,0.22)';
+    ctx.beginPath();
+    ctx.ellipse(1.6, -41, 3.4, 5, 0.1, 0, 6.283);
+    ctx.fill();
+
+    // eye
+    ctx.save();
+    ctx.shadowColor = 'rgba(190,255,120,1)';
+    ctx.shadowBlur = 9;
+    ctx.fillStyle = '#d8ff7a';
+    ctx.beginPath();
+    ctx.ellipse(7.4, -43.2, 1.8, 2.3, -0.2, 0, 6.283);
+    ctx.fill();
+    ctx.restore();
+
+    // brow
+    ctx.strokeStyle = 'rgba(30,10,30,0.75)';
+    ctx.lineWidth = 1.3;
+    ctx.beginPath();
+    ctx.moveTo(5.2, -46.4);
+    ctx.lineTo(10.4, -45.4);
+    ctx.stroke();
+
+    // smirk
+    ctx.beginPath();
+    ctx.moveTo(9.4, -37.6);
+    ctx.quadraticCurveTo(11.6, -36.4, 13.2, -37.6);
+    ctx.stroke();
+
+    /* ---------- hat ---------- */
+    ctx.fillStyle = WITCH.hat;
+    ctx.beginPath();
+    ctx.ellipse(3.6, -47.2, 16.4, 4, -0.08, 0, 6.283);
+    ctx.fill();
+
+    var tipX = -16 + flut * 1.6, tipY = -74 + Math.sin(t * 3.4) * 1.6;
+    ctx.beginPath();
+    ctx.moveTo(-8.4, -48.4);
+    ctx.quadraticCurveTo(-6, -62, -14 + flut, -70);
+    ctx.quadraticCurveTo(-17 + flut * 1.6, -76, tipX - 4, tipY);
+    ctx.quadraticCurveTo(-4, -70, 0.6, -62);
+    ctx.quadraticCurveTo(6, -55, 13.4, -48.6);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.strokeStyle = 'rgba(180,120,235,0.55)';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(-8.4, -48.4);
+    ctx.quadraticCurveTo(-6, -62, -14 + flut, -70);
+    ctx.quadraticCurveTo(-17 + flut * 1.6, -76, tipX - 4, tipY);
+    ctx.stroke();
+
+    ctx.fillStyle = WITCH.hatBand;
+    ctx.beginPath();
+    ctx.moveTo(-6.6, -51.2);
+    ctx.quadraticCurveTo(4, -53.6, 13, -48.4);
+    ctx.lineTo(12.4, -45.8);
+    ctx.quadraticCurveTo(3, -50.6, -6, -48.6);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = '#d9b26a';
+    roundRect(6.6, -51.6, 3.4, 3.4, 1);
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  function drawWitch() {
+    var gap = state.gap;
+    var lunge = state.witchLunge || 0;
+    var bob = Math.sin(state.t * 5) * 6;
+    var x = PX - gap + lunge * 30;
+    var y = GY - 52 + bob + Math.sin(state.t * 2.1) * 3;
     var near = clamp(1 - (gap - GAP_CATCH) / (GAP_MAX - GAP_CATCH), 0, 1);
+
+    drawShadow(Math.min(x, PX), GY + 3, 30, 6);
+
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    var aura = ctx.createRadialGradient(0, -16, 4, 0, -16, 86);
+    var aura = ctx.createRadialGradient(x, y - 30, 4, x, y - 30, 92);
     aura.addColorStop(0, 'rgba(150,255,120,' + (0.10 + near * 0.26) + ')');
     aura.addColorStop(0.5, 'rgba(130,200,140,' + (0.04 + near * 0.1) + ')');
     aura.addColorStop(1, 'rgba(120,60,200,0)');
     ctx.fillStyle = aura;
-    ctx.beginPath(); ctx.arc(0, -16, 86, 0, 6.283); ctx.fill();
+    ctx.beginPath(); ctx.arc(x, y - 30, 92, 0, 6.283); ctx.fill();
     ctx.restore();
 
-    // spooky smoke trail
+    // smoke trail
     ctx.save();
-    ctx.globalAlpha = 0.35;
+    ctx.globalAlpha = 0.3;
     ctx.fillStyle = 'rgba(120,90,180,0.5)';
-    for (var s = 0; s < 3; s++) {
-      var sx = -46 - s * 12;
-      var sy = 4 + Math.sin(state.t * 3 + s) * 6;
+    for (var s2 = 0; s2 < 3; s2++) {
+      var sx = x - 52 - s2 * 13;
+      var sy = y + 6 + Math.sin(state.t * 3 + s2) * 6;
       ctx.beginPath();
-      ctx.arc(sx, sy, 9 - s * 2, 0, 6.283);
+      ctx.arc(sx, sy, 10 - s2 * 2.4, 0, 6.283);
       ctx.fill();
     }
     ctx.restore();
 
-    // broom stick
-    ctx.strokeStyle = '#a2743f';
-    ctx.lineWidth = 4.2;
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.moveTo(-52, 10);
-    ctx.lineTo(34, -1);
-    ctx.stroke();
-
-    // bristles
-    ctx.strokeStyle = '#d9b26a';
-    ctx.lineWidth = 1.8;
-    for (var b = 0; b < 7; b++) {
-      var a = -0.15 + (b - 3) * 0.14;
-      ctx.beginPath();
-      ctx.moveTo(-50, 9);
-      ctx.lineTo(-50 + Math.cos(a + 3.0) * 22, 9 + Math.sin(a + 3.0) * 22);
-      ctx.stroke();
-    }
-
-    // witch body
-    ctx.fillStyle = '#5d1a44';
-    ctx.beginPath();
-    ctx.moveTo(-2, -26);
-    ctx.quadraticCurveTo(-14, -18, -16, -2);
-    ctx.quadraticCurveTo(-4, 4, 10, -2);
-    ctx.quadraticCurveTo(12, -18, 5, -27);
-    ctx.closePath();
-    ctx.fill();
-
-    // cape flutter
-    ctx.fillStyle = '#43102f';
-    var fl = Math.sin(state.t * 7) * 4;
-    ctx.beginPath();
-    ctx.moveTo(-4, -26);
-    ctx.quadraticCurveTo(-22, -22 + fl, -30, -6 + fl);
-    ctx.quadraticCurveTo(-18, -12, -6, -12);
-    ctx.closePath();
-    ctx.fill();
-
-    // arm holding broom
-    ctx.strokeStyle = '#7fd6a8';
-    ctx.lineWidth = 4;
-    ctx.beginPath();
-    ctx.moveTo(2, -20);
-    ctx.lineTo(14, -8);
-    ctx.stroke();
-    ctx.fillStyle = '#7fd6a8';
-    ctx.beginPath(); ctx.arc(15, -7, 3.2, 0, 6.283); ctx.fill();
-
-    // head
-    ctx.fillStyle = '#8fe3b4';
-    ctx.beginPath();
-    ctx.arc(6, -33, 9, 0, 6.283);
-    ctx.fill();
-
-    // nose
-    ctx.beginPath();
-    ctx.moveTo(13, -35);
-    ctx.lineTo(22, -30.5);
-    ctx.lineTo(13, -28.5);
-    ctx.closePath();
-    ctx.fill();
-
-    // hair
-    ctx.fillStyle = '#2b1030';
-    ctx.beginPath();
-    ctx.arc(3, -36, 9.4, 2.2, 5.6);
-    ctx.fill();
-
-    // hat
-    ctx.fillStyle = '#1b0f2c';
-    ctx.beginPath();
-    ctx.moveTo(-4, -40);
-    ctx.quadraticCurveTo(2, -60, -8, -66);
-    ctx.quadraticCurveTo(8, -58, 16, -41);
-    ctx.closePath();
-    ctx.fill();
-    ctx.beginPath();
-    ctx.ellipse(6, -40, 16, 4.4, -0.12, 0, 6.283);
-    ctx.fill();
-    ctx.fillStyle = '#8b3fbe';
-    ctx.fillRect(-3, -44, 16, 3.4);
-
-    // eyes
-    ctx.save();
-    ctx.shadowColor = 'rgba(180,255,110,1)';
-    ctx.shadowBlur = 10;
-    ctx.fillStyle = '#c6ff6a';
-    ctx.beginPath(); ctx.ellipse(8.5, -35.5, 1.9, 2.4, 0, 0, 6.283); ctx.fill();
-    ctx.beginPath(); ctx.ellipse(13.5, -35.5, 1.6, 2.1, 0, 0, 6.283); ctx.fill();
-    ctx.restore();
-
-    // cackle grin
-    ctx.strokeStyle = 'rgba(30,10,30,0.8)';
-    ctx.lineWidth = 1.4;
-    ctx.beginPath();
-    ctx.arc(13, -27, 3.4, 0.2, 2.2);
-    ctx.stroke();
-
-    ctx.restore();
+    drawWitchFigure(x, y, { t: state.t, scale: 0.95, bob: 0, speed: state.speed, face: 1 });
   }
 
   /* ================= particles / fx ================= */
@@ -1587,8 +1906,436 @@
     ctx.fillRect(0, 0, VW, VH);
   }
 
+  /* ================= shrine ================= */
+  function drawRelic(x, y, inten, t) {
+    var pulse = 0.85 + Math.sin(t * 5) * 0.15;
+    var R = 9 * pulse * (0.8 + inten * 0.5);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    var haze = ctx.createRadialGradient(x, y, 1, x, y, R * 5);
+    haze.addColorStop(0, 'rgba(255,232,190,' + (0.42 + inten * 0.3) + ')');
+    haze.addColorStop(0.35, 'rgba(255,176,90,0.18)');
+    haze.addColorStop(1, 'rgba(220,120,60,0)');
+    ctx.fillStyle = haze;
+    ctx.beginPath(); ctx.arc(x, y, R * 5, 0, 6.283); ctx.fill();
+    ctx.restore();
+
+    var core = ctx.createRadialGradient(x - R * 0.3, y - R * 0.35, R * 0.1, x, y, R);
+    core.addColorStop(0, '#fffdf4');
+    core.addColorStop(0.4, '#ffe6a8');
+    core.addColorStop(1, '#ffb14a');
+    ctx.fillStyle = core;
+    ctx.beginPath(); ctx.arc(x, y, R, 0, 6.283); ctx.fill();
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.strokeStyle = 'rgba(255,240,200,' + (0.5 * inten) + ')';
+    ctx.lineWidth = 1.4;
+    for (var i = 0; i < 4; i++) {
+      var a = t * 1.6 + i * 1.57;
+      ctx.beginPath();
+      ctx.moveTo(x + Math.cos(a) * R * 1.6, y + Math.sin(a) * R * 1.6);
+      ctx.lineTo(x + Math.cos(a) * R * 2.6, y + Math.sin(a) * R * 2.6);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawShrine(x, gy, sc, glow, t) {
+    ctx.save();
+    ctx.translate(x, gy);
+    ctx.scale(sc, sc);
+
+    var STONE = '#2b2439', STONE_L = '#4a4062', STONE_D = '#171223';
+
+    // ambient glow
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    var gg = ctx.createRadialGradient(0, -46, 4, 0, -46, 96);
+    gg.addColorStop(0, 'rgba(150,110,255,' + (0.16 + glow * 0.26) + ')');
+    gg.addColorStop(1, 'rgba(110,60,200,0)');
+    ctx.fillStyle = gg;
+    ctx.beginPath(); ctx.arc(0, -46, 96, 0, 6.283); ctx.fill();
+    ctx.restore();
+
+    // steps
+    ctx.fillStyle = STONE_D;
+    roundRect(-48, -9, 96, 10, 3); ctx.fill();
+    ctx.fillStyle = STONE;
+    roundRect(-40, -17, 80, 9, 3); ctx.fill();
+    ctx.fillStyle = STONE_L;
+    roundRect(-40, -17, 80, 2.6, 2); ctx.fill();
+
+    // back slab with arch
+    ctx.fillStyle = STONE;
+    ctx.beginPath();
+    ctx.moveTo(-27, -17);
+    ctx.lineTo(-27, -74);
+    ctx.quadraticCurveTo(0, -98, 27, -74);
+    ctx.lineTo(27, -17);
+    ctx.closePath();
+    ctx.fill();
+
+    // niche
+    ctx.fillStyle = '#0b0714';
+    ctx.beginPath();
+    ctx.moveTo(-16, -19);
+    ctx.lineTo(-16, -70);
+    ctx.quadraticCurveTo(0, -88, 16, -70);
+    ctx.lineTo(16, -19);
+    ctx.closePath();
+    ctx.fill();
+
+    // niche inner glow
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    var ng = ctx.createRadialGradient(0, -56, 2, 0, -56, 34);
+    ng.addColorStop(0, 'rgba(180,140,255,' + (0.3 * glow + 0.08) + ')');
+    ng.addColorStop(1, 'rgba(120,70,220,0)');
+    ctx.fillStyle = ng;
+    ctx.beginPath(); ctx.arc(0, -56, 34, 0, 6.283); ctx.fill();
+    ctx.restore();
+
+    // pillars
+    [-24, 24].forEach(function (px) {
+      ctx.fillStyle = STONE_L;
+      roundRect(px - 6, -72, 12, 56, 3); ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.06)';
+      roundRect(px - 4.6, -70, 3.4, 52, 2); ctx.fill();
+      ctx.fillStyle = STONE;
+      roundRect(px - 8, -76, 16, 6, 2); ctx.fill();
+      roundRect(px - 8, -20, 16, 5, 2); ctx.fill();
+    });
+
+    // altar
+    ctx.fillStyle = STONE_L;
+    roundRect(-18, -52, 36, 6, 2); ctx.fill();
+    ctx.fillStyle = 'rgba(200,175,255,0.16)';
+    roundRect(-18, -52, 36, 1.8, 1); ctx.fill();
+
+    // runes on the slab
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.strokeStyle = 'rgba(160,220,255,' + (0.25 + glow * 0.45) + ')';
+    ctx.lineWidth = 1.3;
+    for (var i = 0; i < 4; i++) {
+      var ry2 = -30 - i * 7;
+      ctx.beginPath();
+      ctx.moveTo(-3.4, ry2);
+      ctx.lineTo(2.8, ry2);
+      ctx.moveTo(0.6, ry2);
+      ctx.lineTo(0.6, ry2 + 4);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // moss / vines
+    ctx.strokeStyle = 'rgba(70,160,120,0.5)';
+    ctx.lineWidth = 1.6;
+    for (var v = 0; v < 3; v++) {
+      var vx = -22 + v * 22;
+      ctx.beginPath();
+      ctx.moveTo(vx, -18);
+      ctx.bezierCurveTo(vx + 5, -30, vx - 5, -42, vx + 3, -52);
+      ctx.stroke();
+    }
+    ctx.fillStyle = 'rgba(76,170,120,0.4)';
+    ctx.beginPath(); ctx.ellipse(-28, -18, 12, 3.4, 0, 0, 6.283); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(30, -17.6, 10, 3, 0, 0, 6.283); ctx.fill();
+
+    // candles
+    for (var c = 0; c < 2; c++) {
+      var cx2 = c ? 32 : -32;
+      ctx.fillStyle = '#d9cbb0';
+      roundRect(cx2 - 2, -28, 4, 11, 1.4); ctx.fill();
+      var flick = 0.7 + Math.sin(t * 11 + c * 2.1) * 0.3;
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      var fg = ctx.createRadialGradient(cx2, -31, 0, cx2, -31, 9 * flick);
+      fg.addColorStop(0, 'rgba(255,220,150,0.95)');
+      fg.addColorStop(1, 'rgba(255,150,60,0)');
+      ctx.fillStyle = fg;
+      ctx.beginPath(); ctx.arc(cx2, -31, 9 * flick, 0, 6.283); ctx.fill();
+      ctx.restore();
+      ctx.fillStyle = '#ffd98a';
+      ctx.beginPath(); ctx.ellipse(cx2, -31, 1.5, 2.6 * flick, 0, 0, 6.283); ctx.fill();
+    }
+
+    ctx.restore();
+  }
+
+  /* ================= intro sequence ================= */
+  var T = {
+    fade: 0.7, walk: 4.2, approach: 5.9, reach: 6.7,
+    lift: 7.3, light: 8.2, witch: 9.5, spin1: 9.8,
+    turn: 10.1, spin2: 10.4, bolt: 10.7, run: 11.2
+  };
+
+  var introRefs = {};
+
+  function setCaption(txt) {
+    var c = document.getElementById('caption');
+    if (!c || c.textContent === txt) return;
+    c.textContent = txt;
+    if (txt) c.classList.add('show');
+    else c.classList.remove('show');
+  }
+
+  function startIntro() {
+    Sfx.ensure();
+    state = newState();
+    player = newPlayer();
+    state.mode = 'intro';
+
+    var target = VW * 0.66;
+    state.intro = {
+      t: 0,
+      shrineX: VW + 70,
+      shrineTarget: target,
+      thiefX: PX,
+      targetX: target - 78,
+      walkSpeed: ((VW + 70) - target) / 4.2,
+      phase: 0,
+      spin: 0,
+      light: 0,
+      relicX: 0,
+      relicY: 0,
+      relicLift: 0,
+      witchX: -340,
+      witchIn: 0,
+      shrieked: false,
+      chimed: false,
+      capt: '',
+      boltX: 0
+    };
+    state.intro.relicX = target;
+    state.intro.relicY = GY - 84;
+
+    stage.classList.add('cinema');
+    var ui = document.getElementById('introUI');
+    if (ui) ui.classList.add('show');
+    hud.classList.add('hidden');
+    startScreen.classList.add('hidden');
+    overScreen.classList.add('hidden');
+    hintEl.classList.remove('show');
+    setCaption('');
+    lastHud = '';
+  }
+
+  function beginRun() {
+    var keep = state.dist;
+    state = newState();
+    player = newPlayer();
+    state.mode = 'run';
+    state.dist = keep;
+    state.gap = 175;
+    state.flash = 0.9;
+    state.flashColor = '255,244,220';
+    stage.classList.remove('cinema');
+    var ui = document.getElementById('introUI');
+    if (ui) ui.classList.remove('show');
+    hud.classList.remove('hidden');
+    overScreen.classList.add('hidden');
+    startScreen.classList.add('hidden');
+    hintEl.classList.add('show');
+    setTimeout(function () { hintEl.classList.remove('show'); }, 3600);
+    setCaption('');
+    lastHud = '';
+  }
+
+  function skipIntro() {
+    if (state.mode !== 'intro') return;
+    beginRun();
+  }
+
+  function stepIntro(dt) {
+    var I = state.intro;
+    if (!I) { beginRun(); return; }
+    I.t += dt;
+    var t = I.t;
+
+    /* world + shrine scroll */
+    var scrollSpeed = 0;
+    if (I.shrineX > I.shrineTarget) {
+      var ease = t > T.walk ? Math.max(0, 1 - (t - T.walk) / 0.9) : 1;
+      scrollSpeed = I.walkSpeed * Math.max(0.12, ease);
+      var step = scrollSpeed * dt;
+      if (I.shrineX - step < I.shrineTarget) step = I.shrineX - I.shrineTarget;
+      I.shrineX -= step;
+      state.dist += step;
+    }
+
+    /* thief movement */
+    var prevX = I.thiefX;
+    if (t > T.walk && t < T.approach) {
+      var k = (t - T.walk) / (T.approach - T.walk);
+      var e = 1 - Math.pow(1 - k, 2.1);
+      I.thiefX = PX + (I.targetX - PX) * e;
+    } else if (t >= T.bolt) {
+      I.thiefX += 46 * dt;
+    }
+    var moveSpeed = Math.abs(I.thiefX - prevX) / Math.max(dt, 0.0001);
+
+    if (t < T.reach) {
+      I.phase += (moveSpeed + scrollSpeed) * dt * (1.5708 / 9);
+    }
+
+    /* relic lift */
+    if (t >= T.lift && t < T.light) {
+      I.relicLift = clamp((t - T.lift) / (T.light - T.lift), 0, 1);
+      var e2 = I.relicLift;
+      var hx = I.thiefX + 25 * 1.45;
+      var hy = GY - 81;
+      I.relicX = I.shrineTarget + (hx - I.shrineTarget) * e2;
+      I.relicY = (GY - 84) + (hy - (GY - 84)) * e2 - Math.sin(e2 * Math.PI) * 16;
+      if (I.relicLift > 0.35 && !I.chimed) {
+        I.chimed = true;
+        Sfx.chime();
+        burst(I.relicX, I.relicY, 'rgba(255,220,150,1)', 14, 170, 120);
+      }
+    }
+    if (t >= T.light) {
+      I.relicLift = 1;
+      I.relicX = I.thiefX + 4.3 * 1.45;
+      I.relicY = GY - 49;
+    }
+
+    /* light ramp */
+    I.light = clamp((t - (T.light - 0.35)) / 0.9, 0, 1);
+
+    /* witch swoop */
+    if (t >= T.witch - 1.1) {
+      I.witchIn = clamp((t - (T.witch - 1.1)) / 1.1, 0, 1);
+      var we = 1 - Math.pow(1 - I.witchIn, 2.4);
+      I.witchX = -340 + (I.thiefX - 190 + 340) * we;
+      if (I.witchIn > 0.6 && !I.shrieked) {
+        I.shrieked = true;
+        Sfx.shriek();
+        state.shake = 16;
+        state.flash = 0.8;
+        state.flashColor = '190,40,90';
+        burst(I.witchX + 20, GY - 70, 'rgba(190,255,140,1)', 18, 220, 240);
+      }
+    }
+
+    /* turn animation */
+    if (t >= T.spin1 && t < T.turn) {
+      I.spin = clamp((t - T.spin1) / (T.turn - T.spin1), 0, 1);
+    } else if (t >= T.turn && t < T.spin2) {
+      I.spin = 1;
+    } else if (t >= T.spin2) {
+      I.spin = 1 + clamp((t - T.spin2) / 0.32, 0, 1);
+    }
+
+    /* captions */
+    var cap = '';
+    if (t > T.fade) cap = 'Deep in the woods, the witch\u2019s shrine';
+    if (t > T.reach - 0.6) cap = 'He took back what was his';
+    if (t > T.witch - 0.4) cap = 'She noticed';
+    if (cap !== I.capt) { I.capt = cap; setCaption(cap); }
+
+    /* fx decay */
+    if (state.shake > 0) state.shake = Math.max(0, state.shake - dt * 46);
+    if (state.flash > 0) state.flash = Math.max(0, state.flash - dt * 2.2);
+
+    /* particles */
+    for (var i = state.particles.length - 1; i >= 0; i--) {
+      var p = state.particles[i];
+      p.life += dt;
+      if (p.life >= p.max) { state.particles.splice(i, 1); continue; }
+      p.vy += p.grav * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+    }
+
+    if (t >= T.run) beginRun();
+  }
+
+  function renderIntro() {
+    var I = state.intro;
+    var t = I ? I.t : 0;
+
+    drawSky();
+    drawStars();
+    drawMoon();
+    drawRidge(0.035, GY * 0.56, '#0b0619', 1);
+    drawRidge(0.075, GY * 0.34, '#100a22', 1.7);
+    treeLayer(0.10, 210, 190, '#150c28', 0.85, 'pine');
+    drawFog();
+    treeLayer(0.26, 165, 150, '#180d2c', 0.95, 'mix');
+    drawFog();
+    treeLayer(0.5, 210, 170, '#120a20', 1, 'bare');
+    drawGround();
+
+    if (!I) return;
+
+    var SC = 1.45;
+    var shrineGlow = 1 - I.relicLift * 0.55;
+
+    drawShrine(I.shrineX, GY, SC, shrineGlow, t);
+
+    if (I.relicLift < 1) {
+      drawRelic(I.shrineX, GY - 84, 1 - I.relicLift * 0.4, t);
+    }
+
+    /* witch */
+    if (I.witchIn > 0) {
+      var wob = Math.sin(t * 4.4) * 5;
+      var wx = I.witchX;
+      var wy = GY - 54 + wob + (1 - I.witchIn) * -40;
+      ctx.save();
+      ctx.globalAlpha = clamp(I.witchIn * 2, 0, 1);
+      drawWitchFigure(wx, wy, {
+        t: t, scale: SC * 0.94, bob: 0, speed: 520, face: 1
+      });
+      ctx.restore();
+    }
+
+    /* thief */
+    var pose = 'walk';
+    var lean = 0.07;
+    if (t >= T.reach && t < T.light) { pose = 'reach'; lean = 0.12; }
+    else if (t >= T.light && t < T.bolt) { pose = 'stand'; lean = 0.05; }
+    else if (t >= T.bolt) { pose = 'run'; lean = 0.17; }
+
+    var turn = Math.cos(I.spin * Math.PI);
+    drawThief(I.thiefX, GY, {
+      pose: pose, phase: I.phase, scale: SC, turn: turn,
+      lean: lean, lit: I.light
+    });
+
+    /* held relic */
+    if (I.relicLift >= 1) {
+      drawRelic(I.relicX, I.relicY, I.light, t);
+    }
+
+    drawParticles();
+    drawForeground();
+
+    /* fade in */
+    var fade = 0;
+    if (t < T.fade) fade = 1 - t / T.fade;
+    if (fade > 0) {
+      ctx.fillStyle = 'rgba(3,1,8,' + fade.toFixed(3) + ')';
+      ctx.fillRect(0, 0, VW, VH);
+    }
+
+    drawFlash();
+    drawVignette();
+  }
+
   /* ================= render ================= */
   function render() {
+    if (state.mode === 'intro') {
+      ctx.save();
+      if (state.shake > 0.4) {
+        ctx.translate((Math.random() - 0.5) * state.shake, (Math.random() - 0.5) * state.shake);
+      }
+      renderIntro();
+      ctx.restore();
+      return;
+    }
+
     ctx.save();
     if (state.shake > 0.4) {
       ctx.translate((Math.random() - 0.5) * state.shake, (Math.random() - 0.5) * state.shake);
@@ -1638,9 +2385,14 @@
     if (e.repeat) return;
     if (isButton(document.activeElement) && (k === ' ' || k === 'Enter')) return;
 
+    if (state.mode === 'intro') {
+      if (k === ' ' || k === 'Enter' || k === 'Escape' || k === 's' || k === 'S') skipIntro();
+      return;
+    }
+
     if (k === ' ' || k === 'ArrowUp' || k === 'w' || k === 'W') {
       if (state.mode === 'run') jump();
-      else if (state.mode === 'start') startGame();
+      else if (state.mode === 'start') startIntro();
       else if (state.mode === 'over') restart();
     } else if (k === 'ArrowDown' || k === 's' || k === 'S') {
       if (state.mode === 'run') slide();
@@ -1683,7 +2435,8 @@
   canvas.addEventListener('pointercancel', function () { ptr = null; }, { passive: true });
   canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
 
-  startBtn.addEventListener('click', function () { startBtn.blur(); startGame(); });
+  startBtn.addEventListener('click', function () { startBtn.blur(); startIntro(); });
+  if (skipBtn) skipBtn.addEventListener('click', function () { Sfx.ensure(); skipIntro(); });
   againBtn.addEventListener('click', function () { againBtn.blur(); restart(); });
 
   var MUTE_ON = '<svg viewBox="0 0 24 24"><path d="M4 10v4h3l4 3V7L7 10H4z"/><path d="M16.5 8.5a5 5 0 0 1 0 7"/><path d="M19 6a8.5 8.5 0 0 1 0 12"/></svg>';
